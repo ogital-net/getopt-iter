@@ -22,14 +22,14 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-getopt-iter = "0.1"
+getopt-iter = "1.0.1"
 ```
 
 For `no_std` environments, disable default features:
 
 ```toml
 [dependencies]
-getopt-iter = { version = "0.1", default-features = false }
+getopt-iter = { version = "1.0.1", default-features = false }
 ```
 
 ## Quick Start
@@ -276,7 +276,7 @@ The library supports `no_std` environments. Disable the default `std` feature:
 
 ```toml
 [dependencies]
-getopt-iter = { version = "0.1", default-features = false }
+getopt-iter = { version = "1.0.1", default-features = false }
 ```
 
 In `no_std` mode:
