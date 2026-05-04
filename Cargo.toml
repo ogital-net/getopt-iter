@@ -1,0 +1,34 @@
+[package]
+name = "getopt-iter"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.64"
+license = "BSD-2-Clause"
+description = "A POSIX style getopt parser for Rust"
+homepage = "https://github.com/ogital-net/getopt-rs"
+repository = "https://github.com/ogital-net/getopt-rs"
+documentation = "https://docs.rs/getopt-iter"
+readme = "README.md"
+keywords = ["getopt", "posix", "argv", "cli", "no_std"]
+categories = ["command-line-interface", "no-std", "parser-implementations"]
+include = [
+    "src/**/*.rs",
+    "Cargo.toml",
+    "LICENSE",
+    "README.md",
+]
+
+[features]
+default = ["std"]
+std = []
+
+[dependencies]
+
+[dev-dependencies]
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+getargs = "0.5"
+getopts = "0.2"
+
+[[bench]]
+name = "versus"
+harness = false
