@@ -251,10 +251,23 @@ pub trait ArgV: sealed::Sealed {
     /// Unicode replacement character (U+FFFD), which forces an allocation. Valid
     /// UTF-8 input is passed through without copying.
     fn into_argv(self) -> Cow<'static, str>;
+
+    /// Non-destructively view self as a `&str`.
+    ///
+    /// Used internally to inspect an argument (e.g. to decide whether it begins with `-`)
+    /// without consuming it, so that non-option arguments can be left in place for
+    /// [`Getopt::remaining`].
+    ///
+    /// For `OsStr`/`OsString`/`CStr`, invalid UTF-8 sequences are replaced with the
+    /// Unicode replacement character (U+FFFD).
+    fn as_argv(&self) -> Cow<'_, str>;
 }
 
 impl ArgV for &'static str {
     fn into_argv(self) -> Cow<'static, str> {
+        Cow::Borrowed(self)
+    }
+    fn as_argv(&self) -> Cow<'_, str> {
         Cow::Borrowed(self)
     }
 }
@@ -263,11 +276,17 @@ impl ArgV for &&'static str {
     fn into_argv(self) -> Cow<'static, str> {
         Cow::Borrowed(*self)
     }
+    fn as_argv(&self) -> Cow<'_, str> {
+        Cow::Borrowed(*self)
+    }
 }
 
 impl ArgV for String {
     fn into_argv(self) -> Cow<'static, str> {
         Cow::Owned(self)
+    }
+    fn as_argv(&self) -> Cow<'_, str> {
+        Cow::Borrowed(self.as_str())
     }
 }
 
@@ -279,6 +298,9 @@ impl ArgV for OsString {
             Err(s) => Cow::Owned(s.to_string_lossy().into_owned()),
         }
     }
+    fn as_argv(&self) -> Cow<'_, str> {
+        self.as_os_str().to_string_lossy()
+    }
 }
 
 #[cfg(feature = "std")]
@@ -286,11 +308,17 @@ impl ArgV for &'static OsStr {
     fn into_argv(self) -> Cow<'static, str> {
         self.to_string_lossy()
     }
+    fn as_argv(&self) -> Cow<'_, str> {
+        (*self).to_string_lossy()
+    }
 }
 
 impl ArgV for &'static core::ffi::CStr {
     fn into_argv(self) -> Cow<'static, str> {
         self.to_string_lossy()
+    }
+    fn as_argv(&self) -> Cow<'_, str> {
+        (*self).to_string_lossy()
     }
 }
 
@@ -299,8 +327,14 @@ pub struct Getopt<'a, V, I: Iterator<Item = V>> {
     /// Iterator over arguments  
     iter: I,
 
-    /// Current argument being processed
+    /// The current argument being parsed, in string form. Set only while we are
+    /// actively walking through an option-bearing argument (e.g. `-abc` or `--long`).
     current_arg: Option<Cow<'static, str>>,
+
+    /// A non-option argument that was pulled from `iter` to look at, but which
+    /// turned out to be a positional. It is held here so that [`Getopt::remaining`]
+    /// can yield it back to the caller (chained ahead of `iter`).
+    pending: Option<V>,
 
     /// argv\[0\]
     prog_name: Cow<'static, str>,
@@ -314,6 +348,31 @@ pub struct Getopt<'a, V, I: Iterator<Item = V>> {
 
     /// Option specification string (as bytes)
     optstring: &'a [u8],
+}
+
+/// Iterator returned by [`Getopt::remaining`].
+///
+/// Yields the same item type `V` as the original iterator passed to
+/// [`Getopt::new`]. Any non-option argument that was peeked at by the parser
+/// (but not consumed as an option) is yielded first, followed by the rest of
+/// the underlying iterator.
+pub struct Remaining<V, I: Iterator<Item = V>> {
+    pending: Option<V>,
+    iter: I,
+}
+
+impl<V, I: Iterator<Item = V>> Iterator for Remaining<V, I> {
+    type Item = V;
+
+    fn next(&mut self) -> Option<V> {
+        self.pending.take().or_else(|| self.iter.next())
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let extra = usize::from(self.pending.is_some());
+        let (lo, hi) = self.iter.size_hint();
+        (lo.saturating_add(extra), hi.and_then(|h| h.checked_add(extra)))
+    }
 }
 
 macro_rules! err {
@@ -359,6 +418,7 @@ impl<'a, V: ArgV, I: Iterator<Item = V>> Getopt<'a, V, I> {
         Getopt {
             iter,
             current_arg: None,
+            pending: None,
             prog_name,
             sp: 1,
             opterr: true,
@@ -387,16 +447,17 @@ impl<'a, V: ArgV, I: Iterator<Item = V>> Getopt<'a, V, I> {
         self.opterr = opterr;
     }
 
-    /// Advance to the next argument from the iterator
+    /// Advance to the next argument, draining a previously peeked one first if present.
     fn next_arg(&mut self) -> Option<V> {
-        self.iter.next()
+        self.pending.take().or_else(|| self.iter.next())
     }
 
-    /// Consumes `self` and returns the wrapped iterator at its current position.
+    /// Consumes `self` and returns an iterator over the remaining arguments.
     ///
-    /// This allows access to any remaining command-line arguments that were not
-    /// processed as options. This is typically used after option parsing is complete
-    /// to retrieve positional arguments or arguments after `--`.
+    /// The returned iterator yields the same item type `V` as the iterator originally
+    /// passed to [`Getopt::new`]. It includes any non-option argument that was peeked
+    /// at by the parser (and caused option parsing to stop) followed by the rest of
+    /// the underlying iterator, so no arguments are lost.
     ///
     /// # Examples
     /// ```
@@ -409,8 +470,11 @@ impl<'a, V: ArgV, I: Iterator<Item = V>> Getopt<'a, V, I> {
     ///     println!("Positional arg: {}", arg);
     /// }
     /// ```
-    pub fn remaining(self) -> I {
-        self.iter
+    pub fn remaining(self) -> Remaining<V, I> {
+        Remaining {
+            pending: self.pending,
+            iter: self.iter,
+        }
     }
 
     /// Returns the program name, typically the basename of argv\[0\].
@@ -565,30 +629,42 @@ impl<'a, V: ArgV, I: Iterator<Item = V>> Getopt<'a, V, I> {
     /// Parse command line arguments. Returns the next option found.
     #[allow(clippy::too_many_lines)]
     fn parse_next(&mut self) -> Option<Opt> {
-        // Load next argument if needed
+        // Load next argument if needed.
+        //
+        // When `sp == 1` we are between arguments. Peek at the next `V` non-destructively
+        // via `ArgV::as_argv` so that, if it turns out to be a non-option (or `-`), we can
+        // leave it untouched in `self.pending` for `remaining()` to yield back to the caller.
+        // Only options and the `--` terminator are actually consumed here.
         if self.sp == 1 {
-            if let Some(arg) = self.next_arg() {
-                self.current_arg = Some(arg.into_argv());
-            } else {
-                return None;
+            // Pull the next V (from a previously-peeked slot, or from the iterator).
+            let next_v = match self.pending.take() {
+                Some(v) => v,
+                None => self.iter.next()?,
+            };
+
+            // Inspect without consuming.
+            {
+                let view = next_v.as_argv();
+                if !view.starts_with('-') || view.as_ref() == "-" {
+                    // Non-option: put it back so remaining() can return it.
+                    drop(view);
+                    self.pending = Some(next_v);
+                    return None;
+                }
+                if view.as_ref() == "--" {
+                    // Consume and stop.
+                    return None;
+                }
             }
+
+            // Commit: it's an option-bearing argument.
+            self.current_arg = Some(next_v.into_argv());
         }
 
         let current_arg = match &self.current_arg {
             Some(arg) => arg,
             None => return None,
         };
-
-        // Check for end of options
-        if self.sp == 1 {
-            if !current_arg.starts_with('-') || current_arg == "-" {
-                return None;
-            }
-            if current_arg == "--" {
-                self.current_arg = None;
-                return None;
-            }
-        }
 
         // Getting this far indicates that an option has been encountered.
 
@@ -1095,6 +1171,40 @@ mod tests {
         );
 
         // Consume remaining arguments
+        let mut remaining = getopt.remaining();
+        assert_eq!(remaining.next(), Some("file1.txt").as_ref());
+        assert_eq!(remaining.next(), Some("file2.txt").as_ref());
+        assert_eq!(remaining.next(), None);
+    }
+
+    #[test]
+    fn test_remaining_after_next_returns_none_on_positional() {
+        // Regression: when next() encounters a non-option, the parser must NOT
+        // discard that positional. remaining() must yield it.
+        let args = &["prog", "-a", "file1.txt", "file2.txt"];
+        let mut getopt = Getopt::new(args, "a");
+
+        assert_eq!(getopt.next().map(|o| o.val()), Some('a'));
+        // Drives parse_next past the first positional.
+        assert_eq!(getopt.next(), None);
+        // Calling next() again must not discard the buffered positional either.
+        assert_eq!(getopt.next(), None);
+
+        let mut remaining = getopt.remaining();
+        assert_eq!(remaining.next(), Some("file1.txt").as_ref());
+        assert_eq!(remaining.next(), Some("file2.txt").as_ref());
+        assert_eq!(remaining.next(), None);
+    }
+
+    #[test]
+    fn test_remaining_after_double_dash() {
+        // "--" terminator is consumed and should NOT appear in remaining().
+        let args = &["prog", "-a", "--", "file1.txt", "file2.txt"];
+        let mut getopt = Getopt::new(args, "a");
+
+        assert_eq!(getopt.next().map(|o| o.val()), Some('a'));
+        assert_eq!(getopt.next(), None);
+
         let mut remaining = getopt.remaining();
         assert_eq!(remaining.next(), Some("file1.txt").as_ref());
         assert_eq!(remaining.next(), Some("file2.txt").as_ref());
