@@ -22,14 +22,14 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-getopt-iter = "1.0.1"
+getopt-iter = "1"
 ```
 
 For `no_std` environments, disable default features:
 
 ```toml
 [dependencies]
-getopt-iter = { version = "1.0.1", default-features = false }
+getopt-iter = { version = "1", default-features = false }
 ```
 
 ## Quick Start
@@ -311,8 +311,7 @@ Methods:
 - `set_opterr(&mut self, opterr: bool)` — enable or disable POSIX error messages on stderr
   (default: enabled; only effective with the `std` feature)
 - `next(&mut self) -> Option<Opt>` — parse the next option (also available via the `Iterator` impl)
-- `remaining(self) -> I` — consume the parser and return the underlying iterator at its current
-  position to access positional arguments
+- `remaining(self) -> Peekable<I>` — consume the parser and return an iterator to access positional arguments
 - `prog_name(&self) -> &str` — the basename of `argv[0]`
 
 ### `ArgV` Trait
